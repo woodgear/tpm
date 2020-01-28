@@ -1,130 +1,299 @@
 use failure;
-use std::path::{Path,PathBuf};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json;
-enum Add{
+use std::cmp::{Ord, Ordering};
+use std::collections::VecDeque;
+use std::fmt::Debug;
+use std::fs;
+use std::marker::Sized;
+use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::ptr::NonNull;
+use std::time::Instant;
+
+mod cli;
+use cli::CliConfig;
+
+fn main() {
+}
+
+
+trait Tag {
+    fn get_tags(&self) -> Vec<String>;
+}
+
+#[derive(Debug, Clone, Eq, PartialEq,Serialize, Deserialize)]
+enum TemplateKind {
     Git(String),
     Local(String)
 }
 
-enum CliConfig {
-    Add(Add),
-    Search(String),
-    New(String),
+#[derive(Debug, Clone, Eq, PartialEq,Serialize, Deserialize)]
+struct Meta {
+    tag: Vec<String>,
+    name: String,
+    path: String,
+    kind:TemplateKind,
 }
 
-impl CliConfig {
-    // pub fn new()->Self {
-    //     // Self::Add("https://github.com/amrayn/easyloggingpp.git".to_string());
-    // }
-    pub fn get_home_dir(&self)-> PathBuf {
-        return PathBuf::from("~/.tpm");
+impl Tag for Meta {
+    fn get_tags(&self) -> Vec<String> {
+        return self.tag.clone();
     }
+}
 
-    pub fn execute(&self) -> Result<(),failure::Error> {
-        match self {
-            CliConfig::Add(add)=> {
-                self.do_add(add)
-            }
-            CliConfig::Search(taglist)=> {
-                self.do_search(taglist)
-            }
-            CliConfig::New(id)=> {
-                self.do_new(id)
+impl Ord for Meta {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.name.cmp(&other.name)
+    }
+}
+
+impl PartialOrd for Meta {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+
+unsafe fn clone_from_nonnull<T>(refs: Vec<NonNull<T>>) -> Vec<T>
+where
+    T: Clone,
+{
+    return refs
+        .into_iter()
+        .map(|p| unsafe { p.as_ref() }.clone())
+        .collect();
+}
+
+fn count_and_sort<T>(mut data_source: Vec<T>) -> Vec<T>
+where
+    T: Ord + Eq + Debug,
+{
+    data_source.sort();
+
+    let mut data: VecDeque<(T, u32)> = VecDeque::new();
+    for i in data_source.into_iter() {
+        if let Some(front) = data.back_mut() {
+            if i.eq(&front.0) {
+                front.1 += 1;
+                continue;
             }
         }
+        let i: T = i;
+        data.push_back((i, 1));
+    }
+    let mut data: Vec<(T, u32)> = data.into_iter().collect();
+
+    data.sort_by(|b, a| {
+        if a.1 == b.1 {
+            return a.0.cmp(&b.0);
+        }
+        return a.1.cmp(&b.1);
+    });
+    let data = data.into_iter().map(|i| i.0).collect();
+    return data;
+}
+
+#[derive(Debug, Clone, Eq, PartialEq,Serialize, Deserialize)]
+struct TemplateConfigLock {
+    metas:Vec<Meta>
+}
+
+impl TemplateConfigLock {
+    fn add(&mut self,meta:Meta) {
+        self.metas.push(meta);
     }
 
-    pub fn do_add(&self,add_config:&Add)-> Result<(),failure::Error> {
-        Ok(())
-    }
-
-    pub fn do_update(&self)-> Result<(),failure::Error> {
-        Ok(())
-    }
-    
-    pub fn do_search(&self,tag:&str)-> Result<(),failure::Error> {
-        Ok(())
-    }
-
-    pub fn do_new(&self,id:&str)-> Result<(),failure::Error> {
-        Ok(())
-    }
-
-    pub fn get_all_meta(&self)->Result<TempleteMetas,failure::Error> {
-        let config_json_str = std::fs::read_to_string(self.get_home_dir().join("meta.json"))?;
-        let config: TempleteMetas = serde_json::from_str(&config_json_str)?;
-        Ok(config)
+    fn into_search(&self)->Pin<Box<Searable<Meta>>> {
+        return Searable::from(self.metas.clone());
     }
 }
 
-#[derive(Serialize, Deserialize,Debug,PartialEq, Eq)]
-struct TempleteMeta {
-    url:Option<String>,
-    id:String,
-    tag:Vec<String>,
-    path:String,
+impl TemplateConfigLock {
+    fn from_file(path:String) -> Result<Self,failure::Error> {
+        let data = std::fs::read_to_string(path)?;
+        return Self::from_str(&data)
+    }
+
+    fn from_str(json_str:&str)  -> Result<Self,failure::Error> {
+        let s:Self = serde_json::from_str(json_str)?;
+        return Ok(s);
+    }
+
+    fn into_str(&self)-> Result<String,failure::Error> {
+        let res = serde_json::to_string(self)?;
+        Ok(res)
+    }
+    fn save_to_file(&self,path:&Path)->Result<(),failure::Error> {
+        let json_str = self.into_str()?;
+        std::fs::write(path,json_str.as_bytes())?;
+        Ok(())
+    }
 }
 
-#[derive(Serialize, Deserialize,Debug,PartialEq, Eq)]
-struct TempleteMetas {
-    metas:Vec<TempleteMeta>
+
+struct Searable<T>
+where
+    T: Tag + Clone,
+{
+    hash: HashMap<String, Vec<NonNull<T>>>,
+    data: Vec<T>,
 }
 
-fn main() {
-    // let cli CliConfig
+impl<T> Searable<T>
+where
+    T: Tag + Clone,
+{
+    fn get_refs(self: &Pin<Box<Self>>, tag: &str) -> Vec<NonNull<T>> {
+        let lis = self.hash.get(tag).unwrap_or(&vec![]).to_vec();
+        return lis.into_iter().collect();
+    }
+
+    fn get(self: &Pin<Box<Self>>, tag: &str) -> Vec<T> {
+        let lis = self.hash.get(tag).unwrap_or(&vec![]).to_vec();
+        return unsafe { clone_from_nonnull(lis) };
+    }
+
+    fn get_all(self: &Pin<Box<Self>>) -> Vec<T> {
+        return self.data.clone();
+    }
+
+    fn search(self: &Pin<Box<Self>>, keywords: Vec<&str>) -> Vec<T>
+    where
+        T: Ord + Debug,
+    {
+        use itertools::concat;
+
+        let refs: Vec<Vec<NonNull<T>>> =
+            keywords.iter().map(|tag| self.get_refs(tag)).collect();
+        let refs = concat(refs);
+
+        let refs = count_and_sort(refs);
+        return unsafe { clone_from_nonnull(refs) };
+    }
+
+    fn from(data: Vec<T>) -> Pin<Box<Self>> {
+        let mut res = Box::pin(Self {
+            hash: HashMap::new(),
+            data,
+        });
+
+        let mut hash: HashMap<String, Vec<NonNull<T>>> = HashMap::new();
+        for meta in res.data.iter() {
+            let meta = NonNull::from(meta);
+            for t in unsafe { meta.as_ref() }.get_tags() {
+                hash.entry(t)
+                    .and_modify(|v| v.push(meta))
+                    .or_insert(vec![meta]);
+            }
+        }
+        unsafe {
+            let mut_ref: Pin<&mut Self> = Pin::as_mut(&mut res);
+            Pin::get_unchecked_mut(mut_ref).hash = hash;
+        }
+        res
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn test_custom() {
-        // let config = CliConfig::Add("https://github.com/amrayn/easyloggingpp.git".to_string());
-        // config.execute();
-        // assert_eq!(config.get_home_dir().join("lib/easyloggingpp").exists(),true);
+    fn test_get() {
+        #[derive(Debug, Clone, Eq, PartialEq)]
+        struct Meta {
+            tag: Vec<String>,
+            name: String,
+        }
 
-        // let config = CliConfig::Add(Add::Git("https://github.com/woodgear/my-templete".to_string()));
-        // config.execute();
-        // assert_eq!(config.get_home_dir().join("lib/easyloggingpp").exists(),true);
-        // assert_eq!(config.get_all_meta(),TempleteMetas {
-        //     metas:vec![
-        //         TempleteMeta {
-        //             url:Some("https://github.com/woodgear/my-templete"),
-        //             id:"woodgear-rust-cli",
-        //             tag:vec!["woodgear","rust-cli"],
-        //             path:config.get_home_dir().join("lib/woodgear/my-templete/rust-cli"),
-        //         },
-        //         TempleteMeta {
-        //             url:Some("https://github.com/woodgear/my-templete"),
-        //             id:"woodgear-rust-cli",
-        //             tag:vec!["woodgear","cpp","cli","cmake","cross-platform"],
-        //             path:config.get_home_dir().join("lib/woodgear/my-templete/cpp-cli"),
-        //         },
-        //         ]
-        // });
+        impl Tag for Meta {
+            fn get_tags(&self) -> Vec<String> {
+                return self.tag.clone();
+            }
+        }
+        let m1 = Meta {
+            tag: vec!["t3".to_string()],
+            name: "m1".to_string(),
+        };
+        let m2 = Meta {
+            tag: vec!["t1".to_string(), "t2".to_string()],
+            name: "m2".to_string(),
+        };
+        let m3 = Meta {
+            tag: vec!["t1".to_string(), "t2".to_string()],
+            name: "m3".to_string(),
+        };
 
+        let s = Searable::from(vec![m1.clone(), m2.clone(), m3.clone()]);
 
-        let config = CliConfig::Add(Add::Local("C:\\Users\\developer\\work\\otx\\t".to_string()));
-        config.execute();
-        assert_eq!(config.get_home_dir().join("lib/local/t").exists(),true);
-        assert_eq!(config.get_all_meta().unwrap(),TempleteMetas {
-            metas:vec![
-                TempleteMeta {
-                    url:None,
-                    id:"local-t-rust-cli".to_string(),
-                    tag:vec!["local".to_string(),"rust-cli".to_string(),"rust".to_string(),"cli".to_string(),"failure".to_string()],
-                    path:config.get_home_dir().join("lib/local/t/rust-cli").to_string_lossy().to_string(),
-                },
-                TempleteMeta {
-                    url:None,
-                    id:"local-t-mock-gateway".to_string(),
-                    tag:vec!["local".to_string(),"mock-gateway".to_string(),"cpp".to_string(),"cmake".to_string(),"cross-platform".to_string(),"cli".to_string(),"log".to_string()],
-                    path:config.get_home_dir().join("lib/local/t/mock-gateway").to_string_lossy().to_string(),
-                },
-                ]
-        });
+        let l = s.get("t3");
+        assert_eq!(l, vec![m1.clone()]);
+    }
 
+    #[test]
+    fn test_search() {
+        #[derive(Debug, Clone, Eq, PartialEq)]
+        struct Meta {
+            tag: Vec<String>,
+            name: String,
+        }
 
+        impl Tag for Meta {
+            fn get_tags(&self) -> Vec<String> {
+                return self.tag.clone();
+            }
+        }
+
+        impl Ord for Meta {
+            fn cmp(&self, other: &Self) -> Ordering {
+                self.name.cmp(&other.name)
+            }
+        }
+
+        impl PartialOrd for Meta {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        let m1 = Meta {
+            tag: vec!["t1".to_string()],
+            name: "m1".to_string(),
+        };
+        let m2 = Meta {
+            tag: vec!["t1".to_string(), "t2".to_string()],
+            name: "m2".to_string(),
+        };
+        let m3 = Meta {
+            tag: vec!["t1".to_string(), "t3".to_string()],
+            name: "m3".to_string(),
+        };
+
+        let s = Searable::from(vec![m1.clone(), m2.clone(), m3.clone()]);
+
+        let l = s.search(vec!["t2", "t1"]);
+        assert_eq!(l, vec![m2.clone(), m3.clone(), m1.clone(),]);
+
+        let m1 = Meta {
+            tag: vec!["t1".to_string()],
+            name: "m1".to_string(),
+        };
+        let m2 = Meta {
+            tag: vec!["t1".to_string(), "t2".to_string()],
+            name: "m2".to_string(),
+        };
+        let m3 = Meta {
+            tag: vec!["t2".to_string(), "t3".to_string()],
+            name: "m3".to_string(),
+        };
+
+        let s = Searable::from(vec![m1.clone(), m2.clone(), m3.clone()]);
+
+        let l = s.search(vec!["t2", "t3"]);
+        assert_eq!(l, vec![m3.clone(), m2.clone()]);
+
+        println!("{:?} {:?}", std::line!(), l);
     }
 }

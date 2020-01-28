@@ -1,2 +1,2 @@
 # tpm
-tpm: templete package manager
+tpm: template package manager
