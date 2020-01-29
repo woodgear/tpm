@@ -91,36 +91,141 @@ where
     return data;
 }
 
+fn generate_metas(root_path: &Path) -> Result<Vec<Meta>, failure::Error> {
+    let tpm_config_path = root_path.join(".tpm");
+    if !(tpm_config_path.exists() && tpm_config_path.is_file()) {
+        return Err(failure::format_err!(
+            "tpm_config_path.exists {} tpm_config_path.is_file {}",
+            tpm_config_path.exists(),
+            tpm_config_path.is_file()
+        ));
+    }
+
+    #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+    struct TpmConfig {
+        kind: TemplateKind,
+        #[serde(default)]
+        tag: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+    enum TemplateKind {
+        mutli,
+        single,
+        root,
+        file, //not now
+    }
+
+    let config: TpmConfig = serde_json::from_str(&std::fs::read_to_string(&tpm_config_path)?)?;
+
+    if config.kind == TemplateKind::single {
+        let name = root_path.file_name().unwrap().to_string_lossy().to_string();
+        return Ok(vec![Meta {
+            name,
+            path: root_path.to_string_lossy().to_string(),
+            tag: config.tag.clone(),
+        }]);
+    }
+
+    if config.kind == TemplateKind::root || config.kind == TemplateKind::mutli {
+        //iter dirs
+        let mut metas: Vec<Meta> = vec![];
+        for entry in root_path.read_dir()? {
+            let entry = entry?;
+            if entry.path().is_dir() {
+                let mut sub_metas = generate_metas(&entry.path())?;
+                if config.kind == TemplateKind::mutli {
+                    let name = root_path.file_name().unwrap().to_string_lossy().to_string();
+                    for m in sub_metas.iter_mut() {
+                        m.name = format!("{}-{}", name, m.name);
+                    }
+                }
+                metas.append(&mut sub_metas);
+            }
+        }
+        return Ok(metas);
+    }
+    unreachable!()
+}
+
+enum AddKind {
+    Local(PathBuf),
+    Git(String),
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 struct TemplateConfigLock {
+    root_path: PathBuf,
     metas: Vec<Meta>,
 }
 
 impl TemplateConfigLock {
-    fn add(&mut self, meta: Meta) {
-        self.metas.push(meta);
+    fn new(path: &Path) -> Result<Self, failure::Error> {
+        Self::init(path);
+        let mut s = Self {
+            root_path: path.to_path_buf(),
+            metas: vec![],
+        };
+        s.init_from_file(&s.root_path.join(".tpm.lock"))?;
+        return Ok(s);
     }
 
+    fn init(path: &Path) -> Result<(), failure::Error> {
+        if !path.exists() {
+            std::fs::create_dir_all(path)?
+        }
+        std::fs::write(path.join(".tpm"), r#"{"kind":"root"}"#)?;
+        Ok(())
+    }
+
+    fn do_add(&mut self, add: AddKind) -> Result<(), failure::Error> {
+        if let AddKind::Local(path) = add {
+            return self.do_add_local_file(&path);
+        }
+        return Ok(());
+    }
+
+    fn do_add_local_file(&mut self, path: &Path) -> Result<(), failure::Error> {
+        if !path.exists() {
+            return Err(failure::err_msg("could not find this local template"));
+        }
+        use fs_extra;
+        let mut options = fs_extra::dir::CopyOptions::new();
+        options.copy_inside = true;
+        fs_extra::dir::copy(path, &self.root_path, &options)?;
+        let metas = generate_metas(&self.root_path)?;
+        self.metas = metas;
+        self.save_to_file(&self.root_path.join(".tpm.lock"))?;
+        Ok(())
+    }
+}
+
+impl TemplateConfigLock {
     fn into_search(&self) -> Pin<Box<Searable<Meta>>> {
         return Searable::from(self.metas.clone());
     }
 }
 
 impl TemplateConfigLock {
-    fn from_file(path: String) -> Result<Self, failure::Error> {
-        let data = std::fs::read_to_string(path)?;
-        return Self::from_str(&data);
+    fn init_from_file(&mut self, path: &Path) -> Result<(), failure::Error> {
+        if path.exists() {
+            let data = std::fs::read_to_string(path)?;
+            return self.init_from_str(&data);
+        }
+        return Ok(());
     }
 
-    fn from_str(json_str: &str) -> Result<Self, failure::Error> {
-        let s: Self = serde_json::from_str(json_str)?;
-        return Ok(s);
+    fn init_from_str(&mut self, json_str: &str) -> Result<(), failure::Error> {
+        let metas: Vec<Meta> = serde_json::from_str(json_str)?;
+        self.metas = metas;
+        Ok(())
     }
 
     fn into_str(&self) -> Result<String, failure::Error> {
-        let res = serde_json::to_string(self)?;
+        let res = serde_json::to_string(&self.metas)?;
         Ok(res)
     }
+
     fn save_to_file(&self, path: &Path) -> Result<(), failure::Error> {
         let json_str = self.into_str()?;
         std::fs::write(path, json_str.as_bytes())?;
@@ -193,6 +298,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use filesystem::FakeFileSystem;
+    use filesystem::TempDir;
+    use filesystem::TempFileSystem;
 
     #[test]
     fn test_get() {
@@ -290,6 +398,7 @@ mod tests {
 
         println!("{:?} {:?}", std::line!(), l);
     }
+
     fn do_mock_fs(root: &Path, mock_fs: Vec<(&str, &str, &str)>) {
         for (kind, path, content) in mock_fs {
             println!("k {} p {} c {}", kind, path, content);
@@ -302,17 +411,11 @@ mod tests {
         }
     }
 
-    fn assert_generate_locks(
-        mock_fs: Vec<(&str, &str, &str)>,
+    fn assert_meta_eq(
+        root_path: &Path,
+        real_metas: Vec<Meta>,
         expect_metas: Vec<(&str, Vec<&str>, &str)>,
     ) {
-        use filesystem::FakeFileSystem;
-        use filesystem::TempDir;
-        use filesystem::TempFileSystem;
-        let fake_fs = FakeFileSystem::new().temp_dir("test_tpm").unwrap();
-        let root_path = fake_fs.path();
-        let tpm_path = root_path.join(".tpm");
-        do_mock_fs(&root_path, mock_fs);
         let expect_metas: Vec<Meta> = expect_metas
             .into_iter()
             .map(|(name, tags, path)| Meta {
@@ -321,68 +424,21 @@ mod tests {
                 path: root_path.join(path).to_string_lossy().to_string(),
             })
             .collect();
-        let real_metas = generate_metas(&tpm_path).unwrap();
-        println!("real_metas {:?}", real_metas);
-        println!("expect_metas {:?}", expect_metas);
         assert_eq!(real_metas, expect_metas);
     }
 
-    fn generate_metas(root_path: &Path) -> Result<Vec<Meta>, failure::Error> {
-        let tpm_config_path = root_path.join(".tpm");
-        if !(tpm_config_path.exists() && tpm_config_path.is_file()) {
-            return Err(failure::format_err!(
-                "tpm_config_path.exists {} tpm_config_path.is_file {}",
-                tpm_config_path.exists(),
-                tpm_config_path.is_file()
-            ));
-        }
-
-        #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-        struct TpmConfig {
-            kind: TemplateKind,
-            #[serde(default)]
-            tag: Vec<String>,
-        }
-
-        #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-        enum TemplateKind {
-            mutli,
-            single,
-            root,
-            file, //not now
-        }
-
-        let config: TpmConfig = serde_json::from_str(&std::fs::read_to_string(&tpm_config_path)?)?;
-
-        if config.kind == TemplateKind::single {
-            let name = root_path.file_name().unwrap().to_string_lossy().to_string();
-            return Ok(vec![Meta {
-                name,
-                path: root_path.to_string_lossy().to_string(),
-                tag: config.tag.clone(),
-            }]);
-        }
-
-        if config.kind == TemplateKind::root || config.kind == TemplateKind::mutli {
-            //iter dirs
-            let mut metas: Vec<Meta> = vec![];
-            for entry in root_path.read_dir()? {
-                let entry = entry?;
-                if entry.path().is_dir() {
-                    let mut sub_metas = generate_metas(&entry.path())?;
-                    if config.kind == TemplateKind::mutli {
-                        let name = root_path.file_name().unwrap().to_string_lossy().to_string();
-                        for m in sub_metas.iter_mut() {
-                            m.name = format!("{}-{}", name, m.name);
-                        }
-                    }
-                    metas.append(&mut sub_metas);
-                }
-            }
-            return Ok(metas);
-        }
-        unreachable!()
+    fn assert_generate_locks(
+        mock_fs: Vec<(&str, &str, &str)>,
+        expect_metas: Vec<(&str, Vec<&str>, &str)>,
+    ) {
+        let fake_fs = FakeFileSystem::new().temp_dir("test_tpm").unwrap();
+        let root_path = fake_fs.path();
+        let tpm_path = root_path.join(".tpm");
+        do_mock_fs(&root_path, mock_fs);
+        let real_metas = generate_metas(&tpm_path).unwrap();
+        assert_meta_eq(root_path, real_metas, expect_metas);
     }
+
     #[test]
     fn test_generate_lock() {
         let mock_fs = vec![
@@ -431,5 +487,52 @@ mod tests {
         ];
 
         assert_generate_locks(mock_fs, expect_metas)
+    }
+
+    #[test]
+    fn test_add_local_file() {
+        let local_dir_guard = FakeFileSystem::new().temp_dir("test_add_local").unwrap();
+        let local_path = local_dir_guard.path();
+        let app_dir_guard = FakeFileSystem::new()
+            .temp_dir("test_add_local_app")
+            .unwrap();
+        let app_path = app_dir_guard.path();
+
+        do_mock_fs(
+            local_path,
+            vec![
+                ("f", "a/.tpm", r#"{"kind":"mutli"}"#),
+                ("f", "a/b/.tpm", r#"{"kind":"single","tag":["1"]}"#),
+                ("f", "a/c/.tpm", r#"{"kind":"single","tag":["2"]}"#),
+            ],
+        );
+        println!("{:?}", app_path);
+        let mut app = TemplateConfigLock::new(&app_path.join(".tpm")).unwrap();
+        app.do_add_local_file(&local_path.join("a"));
+        let metas = app.metas;
+        assert_meta_eq(
+            app_path,
+            metas,
+            vec![
+                ("a-b", vec!["1"], ".tpm/a/b"),
+                ("a-c", vec!["2"], ".tpm/a/c"),
+            ],
+        );
+
+        let local_dir_guard = FakeFileSystem::new().temp_dir("test_add_local").unwrap();
+        let local_path = local_dir_guard.path();
+        let app_dir_guard = FakeFileSystem::new()
+            .temp_dir("test_add_local_app")
+            .unwrap();
+        let app_path = app_dir_guard.path();
+
+        do_mock_fs(
+            local_path,
+            vec![("f", "a/.tpm", r#"{"kind":"single","tag":["123"]}"#)],
+        );
+        let mut app = TemplateConfigLock::new(&app_path.join(".tpm")).unwrap();
+        app.do_add_local_file(&local_path.join("a"));
+        let metas = app.metas;
+        assert_meta_eq(app_path, metas, vec![("a", vec!["123"], ".tpm/a")]);
     }
 }
