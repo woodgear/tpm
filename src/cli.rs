@@ -1,4 +1,3 @@
-
 pub enum CliConfig {
     Add(String),
     Search(Vec<String>),
@@ -6,7 +5,7 @@ pub enum CliConfig {
 }
 
 impl CliConfig {
-    fn parse()->Self {
+    fn parse() -> Self {
         unimplemented!()
     }
 }

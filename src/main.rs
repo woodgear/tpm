@@ -2,12 +2,12 @@ use failure;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::cmp::{Ord, Ordering};
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::fs;
 use std::marker::Sized;
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::time::Instant;
@@ -15,26 +15,23 @@ use std::time::Instant;
 mod cli;
 use cli::CliConfig;
 
-fn main() {
-}
-
+fn main() {}
 
 trait Tag {
     fn get_tags(&self) -> Vec<String>;
 }
 
-#[derive(Debug, Clone, Eq, PartialEq,Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 enum TemplateKind {
     Git(String),
-    Local(String)
+    Local(String),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq,Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 struct Meta {
     tag: Vec<String>,
     name: String,
     path: String,
-    kind:TemplateKind,
 }
 
 impl Tag for Meta {
@@ -54,7 +51,6 @@ impl PartialOrd for Meta {
         Some(self.cmp(other))
     }
 }
-
 
 unsafe fn clone_from_nonnull<T>(refs: Vec<NonNull<T>>) -> Vec<T>
 where
@@ -95,43 +91,42 @@ where
     return data;
 }
 
-#[derive(Debug, Clone, Eq, PartialEq,Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 struct TemplateConfigLock {
-    metas:Vec<Meta>
+    metas: Vec<Meta>,
 }
 
 impl TemplateConfigLock {
-    fn add(&mut self,meta:Meta) {
+    fn add(&mut self, meta: Meta) {
         self.metas.push(meta);
     }
 
-    fn into_search(&self)->Pin<Box<Searable<Meta>>> {
+    fn into_search(&self) -> Pin<Box<Searable<Meta>>> {
         return Searable::from(self.metas.clone());
     }
 }
 
 impl TemplateConfigLock {
-    fn from_file(path:String) -> Result<Self,failure::Error> {
+    fn from_file(path: String) -> Result<Self, failure::Error> {
         let data = std::fs::read_to_string(path)?;
-        return Self::from_str(&data)
+        return Self::from_str(&data);
     }
 
-    fn from_str(json_str:&str)  -> Result<Self,failure::Error> {
-        let s:Self = serde_json::from_str(json_str)?;
+    fn from_str(json_str: &str) -> Result<Self, failure::Error> {
+        let s: Self = serde_json::from_str(json_str)?;
         return Ok(s);
     }
 
-    fn into_str(&self)-> Result<String,failure::Error> {
+    fn into_str(&self) -> Result<String, failure::Error> {
         let res = serde_json::to_string(self)?;
         Ok(res)
     }
-    fn save_to_file(&self,path:&Path)->Result<(),failure::Error> {
+    fn save_to_file(&self, path: &Path) -> Result<(), failure::Error> {
         let json_str = self.into_str()?;
-        std::fs::write(path,json_str.as_bytes())?;
+        std::fs::write(path, json_str.as_bytes())?;
         Ok(())
     }
 }
-
 
 struct Searable<T>
 where
@@ -165,8 +160,7 @@ where
     {
         use itertools::concat;
 
-        let refs: Vec<Vec<NonNull<T>>> =
-            keywords.iter().map(|tag| self.get_refs(tag)).collect();
+        let refs: Vec<Vec<NonNull<T>>> = keywords.iter().map(|tag| self.get_refs(tag)).collect();
         let refs = concat(refs);
 
         let refs = count_and_sort(refs);
@@ -295,5 +289,147 @@ mod tests {
         assert_eq!(l, vec![m3.clone(), m2.clone()]);
 
         println!("{:?} {:?}", std::line!(), l);
+    }
+    fn do_mock_fs(root: &Path, mock_fs: Vec<(&str, &str, &str)>) {
+        for (kind, path, content) in mock_fs {
+            println!("k {} p {} c {}", kind, path, content);
+            if kind == "f" {
+                let full_path = root.join(path);
+                let parent_dir = full_path.parent().unwrap();
+                std::fs::create_dir_all(parent_dir).unwrap();
+                std::fs::write(full_path, content);
+            }
+        }
+    }
+
+    fn assert_generate_locks(
+        mock_fs: Vec<(&str, &str, &str)>,
+        expect_metas: Vec<(&str, Vec<&str>, &str)>,
+    ) {
+        use filesystem::FakeFileSystem;
+        use filesystem::TempDir;
+        use filesystem::TempFileSystem;
+        let fake_fs = FakeFileSystem::new().temp_dir("test_tpm").unwrap();
+        let root_path = fake_fs.path();
+        let tpm_path = root_path.join(".tpm");
+        do_mock_fs(&root_path, mock_fs);
+        let expect_metas: Vec<Meta> = expect_metas
+            .into_iter()
+            .map(|(name, tags, path)| Meta {
+                name: name.to_string(),
+                tag: tags.into_iter().map(|s| s.to_string()).collect(),
+                path: root_path.join(path).to_string_lossy().to_string(),
+            })
+            .collect();
+        let real_metas = generate_metas(&tpm_path).unwrap();
+        println!("real_metas {:?}", real_metas);
+        println!("expect_metas {:?}", expect_metas);
+        assert_eq!(real_metas, expect_metas);
+    }
+
+    fn generate_metas(root_path: &Path) -> Result<Vec<Meta>, failure::Error> {
+        let tpm_config_path = root_path.join(".tpm");
+        if !(tpm_config_path.exists() && tpm_config_path.is_file()) {
+            return Err(failure::format_err!(
+                "tpm_config_path.exists {} tpm_config_path.is_file {}",
+                tpm_config_path.exists(),
+                tpm_config_path.is_file()
+            ));
+        }
+
+        #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+        struct TpmConfig {
+            kind: TemplateKind,
+            #[serde(default)]
+            tag: Vec<String>,
+        }
+
+        #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+        enum TemplateKind {
+            mutli,
+            single,
+            root,
+            file, //not now
+        }
+
+        let config: TpmConfig = serde_json::from_str(&std::fs::read_to_string(&tpm_config_path)?)?;
+
+        if config.kind == TemplateKind::single {
+            let name = root_path.file_name().unwrap().to_string_lossy().to_string();
+            return Ok(vec![Meta {
+                name,
+                path: root_path.to_string_lossy().to_string(),
+                tag: config.tag.clone(),
+            }]);
+        }
+
+        if config.kind == TemplateKind::root || config.kind == TemplateKind::mutli {
+            //iter dirs
+            let mut metas: Vec<Meta> = vec![];
+            for entry in root_path.read_dir()? {
+                let entry = entry?;
+                if entry.path().is_dir() {
+                    let mut sub_metas = generate_metas(&entry.path())?;
+                    if config.kind == TemplateKind::mutli {
+                        let name = root_path.file_name().unwrap().to_string_lossy().to_string();
+                        for m in sub_metas.iter_mut() {
+                            m.name = format!("{}-{}", name, m.name);
+                        }
+                    }
+                    metas.append(&mut sub_metas);
+                }
+            }
+            return Ok(metas);
+        }
+        unreachable!()
+    }
+    #[test]
+    fn test_generate_lock() {
+        let mock_fs = vec![
+            (
+                "f",
+                ".tpm/.tpm",
+                r#"
+            {
+                "kind":"root"
+            }
+            "#,
+            ),
+            (
+                "f",
+                ".tpm/a/.tpm",
+                r#"
+            {
+                "kind":"mutli"
+            }
+            "#,
+            ),
+            (
+                "f",
+                ".tpm/a/b/.tpm",
+                r#"
+        {
+            "tag":["b"],
+            "kind":"single"
+        }
+        "#,
+            ),
+            (
+                "f",
+                ".tpm/a/c/.tpm",
+                r#"
+        {
+            "tag":["c"],
+            "kind":"single"
+        }
+        "#,
+            ),
+        ];
+        let expect_metas = vec![
+            ("a-b", vec!["b"], ".tpm/a/b"),
+            ("a-c", vec!["c"], ".tpm/a/c"),
+        ];
+
+        assert_generate_locks(mock_fs, expect_metas)
     }
 }
