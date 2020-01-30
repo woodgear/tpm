@@ -11,11 +11,43 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::time::Instant;
-
+use structopt::StructOpt;
 mod cli;
-use cli::CliConfig;
+use cli::*;
 
-fn main() {}
+fn app() -> Result<(), failure::Error> {
+    let opts: Opts = Opts::from_args();
+    let home_path = "~/.tpm";
+    let mut app = TemplateConfigLock::new(Path::new(home_path))?;
+    match opts.subcmd {
+        SubCommand::Add { path } => {
+            app.do_add(path)?;
+        }
+        SubCommand::New { id, expect_path } => {
+            app.do_new(id, expect_path)?;
+        }
+        SubCommand::Search { tags } => {
+            app.do_search(tags);
+        }
+        SubCommand::ReIndex => {
+            app.reindex()?;
+        }
+        SubCommand::List { tag, template } => {
+            if tag {
+                app.do_list_tag();
+            } else if template {
+                app.do_list_template();
+            }
+        }
+    };
+    Ok(())
+}
+
+fn main() {
+    if let Err(e) = app() {
+        println!("err {:?}", e);
+    }
+}
 
 trait Tag {
     fn get_tags(&self) -> Vec<String>;
@@ -148,15 +180,18 @@ fn generate_metas(root_path: &Path) -> Result<Vec<Meta>, failure::Error> {
     unreachable!()
 }
 
-enum AddKind {
-    Local(PathBuf),
-    Git(String),
-}
-
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 struct TemplateConfigLock {
     root_path: PathBuf,
     metas: Vec<Meta>,
+}
+
+fn copy_dir(origin_path: &Path, targent_path: &Path) -> Result<(), failure::Error> {
+    use fs_extra;
+    let mut options = fs_extra::dir::CopyOptions::new();
+    options.copy_inside = true;
+    fs_extra::dir::copy(origin_path, targent_path, &options)?;
+    Ok(())
 }
 
 impl TemplateConfigLock {
@@ -168,6 +203,13 @@ impl TemplateConfigLock {
         };
         s.init_from_file(&s.root_path.join(".tpm.lock"))?;
         return Ok(s);
+    }
+
+    fn reindex(&mut self) -> Result<(), failure::Error> {
+        let metas = generate_metas(&self.root_path)?;
+        self.metas = metas;
+        self.save_to_file(&self.root_path.join(".tpm.lock"))?;
+        Ok(())
     }
 
     fn init(path: &Path) -> Result<(), failure::Error> {
@@ -189,14 +231,47 @@ impl TemplateConfigLock {
         if !path.exists() {
             return Err(failure::err_msg("could not find this local template"));
         }
-        use fs_extra;
-        let mut options = fs_extra::dir::CopyOptions::new();
-        options.copy_inside = true;
-        fs_extra::dir::copy(path, &self.root_path, &options)?;
-        let metas = generate_metas(&self.root_path)?;
-        self.metas = metas;
-        self.save_to_file(&self.root_path.join(".tpm.lock"))?;
+        copy_dir(path, &self.root_path)?;
+        self.reindex();
         Ok(())
+    }
+
+    fn do_new(&self, id: String, exptect_path: String) -> Result<(), failure::Error> {
+        let template = self
+            .metas
+            .iter()
+            .find(|t| t.name == id)
+            .ok_or(failure::format_err!("could not find template {}", id))?;
+        copy_dir(Path::new(&template.path), Path::new(&exptect_path))?;
+        Ok(())
+    }
+
+    fn do_list_tag(&self) {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        for m in self.metas.iter() {
+            for t in m.tag.iter() {
+                set.insert(t);
+            }
+        }
+        for t in set {
+            println!("tag: {}", t);
+        }
+    }
+
+    fn do_list_template(&self) {
+        for m in self.metas.iter() {
+            println!("{:?}", m);
+        }
+    }
+
+    fn do_search(&self, tag: Vec<String>) {
+        let search = Searable::from(self.metas.clone());
+        let tag: Vec<&str> = tag.iter().map(AsRef::as_ref).collect();
+        let templates = search.search(tag);
+        for t in templates {
+            println!("{:?}", t);
+        }
     }
 }
 
