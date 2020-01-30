@@ -55,11 +55,10 @@ pub enum SubCommand {
         tags: Vec<String>,
     },
     ReIndex,
+    Update,
     List {
         #[structopt(short = "t")]
-        tag: bool,
-        #[structopt(short = "m")]
-        template: bool,
+        show_tag: bool,
     },
 }
 
@@ -100,6 +99,13 @@ mod tests {
                 tags: vec!["123".to_string(), "223".to_string(),]
             }
         );
+
+        let opts: Opts = Opts::from_iter(vec!["./", "list"]);
+        println!("opts {:?}", opts);
+        assert_eq!(opts.subcmd, SubCommand::List { show_tag: false });
+        let opts: Opts = Opts::from_iter(vec!["./", "list", "-t"]);
+        assert_eq!(opts.subcmd, SubCommand::List { show_tag: true });
+
         println!("opts {:?}", opts);
     }
 }

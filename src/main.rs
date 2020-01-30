@@ -14,11 +14,17 @@ use std::time::Instant;
 use structopt::StructOpt;
 mod cli;
 use cli::*;
+use context_attribute::context;
+use failure::ResultExt;
+use git2::Repository;
 
+#[context(fn)]
 fn app() -> Result<(), failure::Error> {
     let opts: Opts = Opts::from_args();
-    let home_path = "~/.tpm";
-    let mut app = TemplateConfigLock::new(Path::new(home_path))?;
+    let home_dir = dirs::home_dir().ok_or(failure::err_msg("could not find home dir"))?;
+
+    let home_path = home_dir.join(".tpm");
+    let mut app = TemplateConfigLock::new(&home_path)?;
     match opts.subcmd {
         SubCommand::Add { path } => {
             app.do_add(path)?;
@@ -32,10 +38,13 @@ fn app() -> Result<(), failure::Error> {
         SubCommand::ReIndex => {
             app.reindex()?;
         }
-        SubCommand::List { tag, template } => {
-            if tag {
+        SubCommand::Update => {
+            app.do_update()?;
+        }
+        SubCommand::List { show_tag } => {
+            if show_tag {
                 app.do_list_tag();
-            } else if template {
+            } else {
                 app.do_list_template();
             }
         }
@@ -94,6 +103,20 @@ where
         .collect();
 }
 
+#[context(fn)]
+fn git_clone_or_update_master(url: &str, path: &Path) -> Result<(), failure::Error> {
+    use git_url_parse::GitUrl;
+    let git_url = GitUrl::parse(url).map_err(|e| failure::format_err!("parser url err {:?}", e))?;
+    let git_repo_path = path.join(&git_url.name);
+    if git_repo_path.exists() {
+        //what do you want more
+        fs_extra::dir::remove(&git_repo_path)?;
+    }
+    use git2::build::RepoBuilder;
+    RepoBuilder::new().local(true).clone(url, &git_repo_path)?;
+    Ok(())
+}
+
 fn count_and_sort<T>(mut data_source: Vec<T>) -> Vec<T>
 where
     T: Ord + Eq + Debug,
@@ -123,11 +146,13 @@ where
     return data;
 }
 
+#[context(fn)]
 fn generate_metas(root_path: &Path) -> Result<Vec<Meta>, failure::Error> {
     let tpm_config_path = root_path.join(".tpm");
     if !(tpm_config_path.exists() && tpm_config_path.is_file()) {
         return Err(failure::format_err!(
-            "tpm_config_path.exists {} tpm_config_path.is_file {}",
+            "{:?} tpm_config_path.exists {} tpm_config_path.is_file {}",
+            root_path,
             tpm_config_path.exists(),
             tpm_config_path.is_file()
         ));
@@ -164,16 +189,26 @@ fn generate_metas(root_path: &Path) -> Result<Vec<Meta>, failure::Error> {
         let mut metas: Vec<Meta> = vec![];
         for entry in root_path.read_dir()? {
             let entry = entry?;
-            if entry.path().is_dir() {
-                let mut sub_metas = generate_metas(&entry.path())?;
-                if config.kind == TemplateKind::mutli {
-                    let name = root_path.file_name().unwrap().to_string_lossy().to_string();
-                    for m in sub_metas.iter_mut() {
-                        m.name = format!("{}-{}", name, m.name);
-                    }
-                }
-                metas.append(&mut sub_metas);
+            let entry_path = entry.path();
+            let entry_name = entry_path.file_name().ok_or(failure::format_err!(
+                "could not get name of {:?}",
+                entry_path
+            ))?;
+            if !entry_path.is_dir() {
+                continue;
             }
+            if entry_name == ".git" {
+                continue;
+            }
+
+            let mut sub_metas = generate_metas(&entry_path)?;
+            if config.kind == TemplateKind::mutli {
+                let name = root_path.file_name().unwrap().to_string_lossy().to_string();
+                for m in sub_metas.iter_mut() {
+                    m.name = format!("{}-{}", name, m.name);
+                }
+            }
+            metas.append(&mut sub_metas);
         }
         return Ok(metas);
     }
@@ -186,6 +221,7 @@ struct TemplateConfigLock {
     metas: Vec<Meta>,
 }
 
+#[context(fn)]
 fn copy_dir(origin_path: &Path, targent_path: &Path) -> Result<(), failure::Error> {
     use fs_extra;
     let mut options = fs_extra::dir::CopyOptions::new();
@@ -195,38 +231,67 @@ fn copy_dir(origin_path: &Path, targent_path: &Path) -> Result<(), failure::Erro
 }
 
 impl TemplateConfigLock {
+    #[context(fn)]
     fn new(path: &Path) -> Result<Self, failure::Error> {
-        Self::init(path);
+        let path = Self::init(&path)?;
         let mut s = Self {
             root_path: path.to_path_buf(),
             metas: vec![],
         };
-        s.init_from_file(&s.root_path.join(".tpm.lock"))?;
+        let lock_path = s.root_path.join(".tpm.lock");
+        if lock_path.exists() {
+            s.init_from_file(&lock_path)?;
+        } else {
+            s.reindex()?;
+        }
         return Ok(s);
     }
 
+    #[context(fn)]
     fn reindex(&mut self) -> Result<(), failure::Error> {
+        println!("reindex");
         let metas = generate_metas(&self.root_path)?;
         self.metas = metas;
         self.save_to_file(&self.root_path.join(".tpm.lock"))?;
         Ok(())
     }
 
-    fn init(path: &Path) -> Result<(), failure::Error> {
+    #[context(fn)]
+    fn init(path: &Path) -> Result<PathBuf, failure::Error> {
         if !path.exists() {
             std::fs::create_dir_all(path)?
         }
         std::fs::write(path.join(".tpm"), r#"{"kind":"root"}"#)?;
-        Ok(())
+        let path = path.canonicalize()?;
+        Ok(path)
     }
 
+    #[context(fn)]
     fn do_add(&mut self, add: AddKind) -> Result<(), failure::Error> {
         if let AddKind::Local(path) = add {
             return self.do_add_local_file(&path);
         }
+        if let AddKind::Git(url) = add {
+            return self.do_add_git(&url);
+        }
+
         return Ok(());
     }
 
+    #[context(fn)]
+    fn do_update(&mut self) -> Result<(), failure::Error> {
+        Ok(())
+    }
+
+    #[context(fn)]
+    fn do_add_git(&mut self, url: &str) -> Result<(), failure::Error> {
+        println!("do_add_git {}", url);
+        git_clone_or_update_master(url, &self.root_path)?;
+        self.reindex();
+        Ok(())
+    }
+
+    #[context(fn)]
     fn do_add_local_file(&mut self, path: &Path) -> Result<(), failure::Error> {
         if !path.exists() {
             return Err(failure::err_msg("could not find this local template"));
@@ -236,6 +301,7 @@ impl TemplateConfigLock {
         Ok(())
     }
 
+    #[context(fn)]
     fn do_new(&self, id: String, exptect_path: String) -> Result<(), failure::Error> {
         let template = self
             .metas
@@ -247,6 +313,7 @@ impl TemplateConfigLock {
     }
 
     fn do_list_tag(&self) {
+        println!("do list tag");
         use std::collections::HashSet;
         let mut set = HashSet::new();
         for m in self.metas.iter() {
@@ -260,6 +327,7 @@ impl TemplateConfigLock {
     }
 
     fn do_list_template(&self) {
+        println!("do list tepmlate");
         for m in self.metas.iter() {
             println!("{:?}", m);
         }
@@ -282,6 +350,7 @@ impl TemplateConfigLock {
 }
 
 impl TemplateConfigLock {
+    #[context(fn)]
     fn init_from_file(&mut self, path: &Path) -> Result<(), failure::Error> {
         if path.exists() {
             let data = std::fs::read_to_string(path)?;
@@ -290,17 +359,20 @@ impl TemplateConfigLock {
         return Ok(());
     }
 
+    #[context(fn)]
     fn init_from_str(&mut self, json_str: &str) -> Result<(), failure::Error> {
         let metas: Vec<Meta> = serde_json::from_str(json_str)?;
         self.metas = metas;
         Ok(())
     }
 
+    #[context(fn)]
     fn into_str(&self) -> Result<String, failure::Error> {
         let res = serde_json::to_string(&self.metas)?;
         Ok(res)
     }
 
+    #[context(fn)]
     fn save_to_file(&self, path: &Path) -> Result<(), failure::Error> {
         let json_str = self.into_str()?;
         std::fs::write(path, json_str.as_bytes())?;
@@ -564,6 +636,14 @@ mod tests {
         assert_generate_locks(mock_fs, expect_metas)
     }
 
+    #[test]
+    fn test_git_clone_or_update_master() {
+        git_clone_or_update_master(
+            "https://github.com/woodgear/t.git",
+            Path::new("/home/oaa/.tpm"),
+        )
+        .unwrap();
+    }
     #[test]
     fn test_add_local_file() {
         let local_dir_guard = FakeFileSystem::new().temp_dir("test_add_local").unwrap();

@@ -15,3 +15,7 @@ filesystem = "0.4.4"
 fs_extra = "1.1.0"
 structopt = "0.3.8"
 url = "2.1.1"
+git2 = "0.11.0"
+context-attribute = {git="https://github.com/woodgear/context-attribute",branch="feature/custom-msg"}
+dirs = "2.0.2"
+git-url-parse = "0.0.1"
