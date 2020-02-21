@@ -230,6 +230,28 @@ fn copy_dir(origin_path: &Path, targent_path: &Path) -> Result<(), failure::Erro
     Ok(())
 }
 
+fn get_git_path(root_path: &Path) -> Result<Vec<PathBuf>, failure::Error> {
+    println!("root path is {:?}", root_path);
+    let mut git_paths = vec![];
+    for e in root_path.read_dir()? {
+        let e = e?;
+        let e_path = e.path();
+        if e_path.is_dir() && e_path.join(".git").exists() {
+            git_paths.push(e_path);
+        }
+    }
+    Ok(git_paths)
+}
+fn git_update(git_path: &Path)-> Result<(),failure::Error> {
+    use std::process::Command;
+    println!("{:?}",git_path);
+    let out = Command::new("git").args(vec!["pull","origin","master"]).current_dir(git_path).output()?;
+    if !out.status.success() {
+       return Err(failure::format_err!("{:?}",out)); 
+    }
+    Ok(())
+}
+
 impl TemplateConfigLock {
     #[context(fn)]
     fn new(path: &Path) -> Result<Self, failure::Error> {
@@ -280,6 +302,11 @@ impl TemplateConfigLock {
 
     #[context(fn)]
     fn do_update(&mut self) -> Result<(), failure::Error> {
+        for git in get_git_path(&self.root_path)? {
+            println!("update {:?}",git);
+            git_update(&git)?;
+        }
+        self.reindex()?;
         Ok(())
     }
 
@@ -585,7 +612,23 @@ mod tests {
         let real_metas = generate_metas(&tpm_path).unwrap();
         assert_meta_eq(root_path, real_metas, expect_metas);
     }
+    #[ignore]
+    #[test]
+    fn test_git_update() {
+        println!("{}", "test git update");
+        let home_dir = dirs::home_dir().unwrap();
+        git_update(&home_dir.join(".tpm").join("t"));
+        assert_eq!(true, true);
+    }
 
+    #[ignore]
+    #[test]
+    fn test_get_git_path() {
+        println!("{}", "print all git paht");
+        let home_dir = dirs::home_dir().unwrap();
+        get_git_path(&home_dir.join(".tpm"));
+        assert_eq!(true, true);
+    }
     #[test]
     fn test_generate_lock() {
         let mock_fs = vec![
