@@ -1,3 +1,4 @@
+#![allow(clippy::needless_return)]
 use failure;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -5,23 +6,19 @@ use std::cmp::{Ord, Ordering};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::fs;
-use std::marker::Sized;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr::NonNull;
-use std::time::Instant;
 use structopt::StructOpt;
 mod cli;
 use cli::*;
 use context_attribute::context;
 use failure::ResultExt;
-use git2::Repository;
 
 #[context(fn)]
 fn app() -> Result<(), failure::Error> {
     let opts: Opts = Opts::from_args();
-    let home_dir = dirs::home_dir().ok_or(failure::err_msg("could not find home dir"))?;
+    let home_dir = dirs::home_dir().ok_or_else(|| failure::err_msg("could not find home dir"))?;
 
     let home_path = home_dir.join(".tpm");
     let mut app = TemplateConfigLock::new(&home_path)?;
@@ -97,10 +94,7 @@ unsafe fn clone_from_nonnull<T>(refs: Vec<NonNull<T>>) -> Vec<T>
 where
     T: Clone,
 {
-    return refs
-        .into_iter()
-        .map(|p| unsafe { p.as_ref() }.clone())
-        .collect();
+    return refs.into_iter().map(|p| p.as_ref().clone()).collect();
 }
 
 #[context(fn)]
@@ -112,8 +106,10 @@ fn git_clone_or_update_master(url: &str, path: &Path) -> Result<(), failure::Err
         //what do you want more
         fs_extra::dir::remove(&git_repo_path)?;
     }
-    use git2::build::RepoBuilder;
-    RepoBuilder::new().local(true).clone(url, &git_repo_path)?;
+    use git2::build::{CloneLocal, RepoBuilder};
+    RepoBuilder::new()
+        .clone_local(CloneLocal::Auto)
+        .clone(url, &git_repo_path)?;
     Ok(())
 }
 
@@ -167,33 +163,33 @@ fn generate_metas(root_path: &Path) -> Result<Vec<Meta>, failure::Error> {
 
     #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
     enum TemplateKind {
-        mutli,
-        single,
-        root,
-        file, //not now
+        Mutli,
+        Single,
+        Root,
+        File, //not now
     }
 
     let config: TpmConfig = serde_json::from_str(&std::fs::read_to_string(&tpm_config_path)?)?;
 
-    if config.kind == TemplateKind::single {
+    if config.kind == TemplateKind::Single {
         let name = root_path.file_name().unwrap().to_string_lossy().to_string();
+        let root_path = root_path.canonicalize().unwrap();
         return Ok(vec![Meta {
             name,
             path: root_path.to_string_lossy().to_string(),
-            tag: config.tag.clone(),
+            tag: config.tag,
         }]);
     }
 
-    if config.kind == TemplateKind::root || config.kind == TemplateKind::mutli {
+    if config.kind == TemplateKind::Root || config.kind == TemplateKind::Mutli {
         //iter dirs
         let mut metas: Vec<Meta> = vec![];
         for entry in root_path.read_dir()? {
             let entry = entry?;
             let entry_path = entry.path();
-            let entry_name = entry_path.file_name().ok_or(failure::format_err!(
-                "could not get name of {:?}",
-                entry_path
-            ))?;
+            let entry_name = entry_path
+                .file_name()
+                .ok_or_else(|| failure::format_err!("could not get name of {:?}", entry_path))?;
             if !entry_path.is_dir() {
                 continue;
             }
@@ -202,7 +198,7 @@ fn generate_metas(root_path: &Path) -> Result<Vec<Meta>, failure::Error> {
             }
 
             let mut sub_metas = generate_metas(&entry_path)?;
-            if config.kind == TemplateKind::mutli {
+            if config.kind == TemplateKind::Mutli {
                 let name = root_path.file_name().unwrap().to_string_lossy().to_string();
                 for m in sub_metas.iter_mut() {
                     m.name = format!("{}-{}", name, m.name);
@@ -222,6 +218,9 @@ struct TemplateConfigLock {
 }
 
 #[context(fn)]
+/// origin_path /a/b/c => c is a directory
+/// target_path /a/b/c1 => c1 doest not exist
+/// after copy dir, c1 and c are exactly same except and name 'c' 'c1' it self
 fn copy_dir(origin_path: &Path, targent_path: &Path) -> Result<(), failure::Error> {
     use fs_extra;
     let mut options = fs_extra::dir::CopyOptions::new();
@@ -242,12 +241,15 @@ fn get_git_path(root_path: &Path) -> Result<Vec<PathBuf>, failure::Error> {
     }
     Ok(git_paths)
 }
-fn git_update(git_path: &Path)-> Result<(),failure::Error> {
+fn git_update(git_path: &Path) -> Result<(), failure::Error> {
     use std::process::Command;
-    println!("{:?}",git_path);
-    let out = Command::new("git").args(vec!["pull","origin","master"]).current_dir(git_path).output()?;
+    println!("{:?}", git_path);
+    let out = Command::new("git")
+        .args(vec!["pull", "origin", "master"])
+        .current_dir(git_path)
+        .output()?;
     if !out.status.success() {
-       return Err(failure::format_err!("{:?}",out)); 
+        return Err(failure::format_err!("{:?}", out));
     }
     Ok(())
 }
@@ -303,7 +305,7 @@ impl TemplateConfigLock {
     #[context(fn)]
     fn do_update(&mut self) -> Result<(), failure::Error> {
         for git in get_git_path(&self.root_path)? {
-            println!("update {:?}",git);
+            println!("update {:?}", git);
             git_update(&git)?;
         }
         self.reindex()?;
@@ -314,7 +316,7 @@ impl TemplateConfigLock {
     fn do_add_git(&mut self, url: &str) -> Result<(), failure::Error> {
         println!("do_add_git {}", url);
         git_clone_or_update_master(url, &self.root_path)?;
-        self.reindex();
+        self.reindex()?;
         Ok(())
     }
 
@@ -324,7 +326,7 @@ impl TemplateConfigLock {
             return Err(failure::err_msg("could not find this local template"));
         }
         copy_dir(path, &self.root_path)?;
-        self.reindex();
+        self.reindex()?;
         Ok(())
     }
 
@@ -334,7 +336,7 @@ impl TemplateConfigLock {
             .metas
             .iter()
             .find(|t| t.name == id)
-            .ok_or(failure::format_err!("could not find template {}", id))?;
+            .ok_or_else(|| failure::format_err!("could not find template {}", id))?;
         copy_dir(Path::new(&template.path), Path::new(&exptect_path))?;
         Ok(())
     }
@@ -370,11 +372,11 @@ impl TemplateConfigLock {
     }
 }
 
-impl TemplateConfigLock {
-    fn into_search(&self) -> Pin<Box<Searable<Meta>>> {
-        return Searable::from(self.metas.clone());
-    }
-}
+// impl TemplateConfigLock {
+//     fn into_search(&self) -> Pin<Box<Searable<Meta>>> {
+//         return Searable::from(self.metas.clone());
+//     }
+// }
 
 impl TemplateConfigLock {
     #[context(fn)]
@@ -424,14 +426,14 @@ where
         return lis.into_iter().collect();
     }
 
-    fn get(self: &Pin<Box<Self>>, tag: &str) -> Vec<T> {
-        let lis = self.hash.get(tag).unwrap_or(&vec![]).to_vec();
-        return unsafe { clone_from_nonnull(lis) };
-    }
+    // fn get(self: &Pin<Box<Self>>, tag: &str) -> Vec<T> {
+    //     let lis = self.hash.get(tag).unwrap_or(&vec![]).to_vec();
+    //     return unsafe { clone_from_nonnull(lis) };
+    // }
 
-    fn get_all(self: &Pin<Box<Self>>) -> Vec<T> {
-        return self.data.clone();
-    }
+    // fn get_all(self: &Pin<Box<Self>>) -> Vec<T> {
+    //     return self.data.clone();
+    // }
 
     fn search(self: &Pin<Box<Self>>, keywords: Vec<&str>) -> Vec<T>
     where
@@ -458,7 +460,7 @@ where
             for t in unsafe { meta.as_ref() }.get_tags() {
                 hash.entry(t)
                     .and_modify(|v| v.push(meta))
-                    .or_insert(vec![meta]);
+                    .or_insert_with(|| vec![meta]);
             }
         }
         unsafe {
@@ -573,6 +575,21 @@ mod tests {
         println!("{:?} {:?}", std::line!(), l);
     }
 
+    fn do_assert_fs(root: &Path, mock_fs: Vec<(&str, &str, &str)>) {
+        for (kind, path, content) in mock_fs {
+            println!("k {} p {} c {}", kind, path, content);
+            if kind == "f" {
+                let full_path = root.join(path);
+                let real_content = std::fs::read_to_string(&full_path).unwrap();
+                assert_eq!(real_content, content);
+            }
+            if kind == "d" {
+                let full_path = root.join(path);
+                assert_eq!(full_path.is_dir(), true);
+            }
+        }
+    }
+
     fn do_mock_fs(root: &Path, mock_fs: Vec<(&str, &str, &str)>) {
         for (kind, path, content) in mock_fs {
             println!("k {} p {} c {}", kind, path, content);
@@ -592,10 +609,13 @@ mod tests {
     ) {
         let expect_metas: Vec<Meta> = expect_metas
             .into_iter()
-            .map(|(name, tags, path)| Meta {
-                name: name.to_string(),
-                tag: tags.into_iter().map(|s| s.to_string()).collect(),
-                path: root_path.join(path).to_string_lossy().to_string(),
+            .map(|(name, tags, path)| {
+                let abs_path = root_path.join(path).canonicalize().unwrap();
+                Meta {
+                    name: name.to_string(),
+                    tag: tags.into_iter().map(|s| s.to_string()).collect(),
+                    path: abs_path.to_string_lossy().to_string(),
+                }
             })
             .collect();
         assert_eq!(real_metas, expect_metas);
@@ -615,7 +635,7 @@ mod tests {
     #[ignore]
     #[test]
     fn test_git_update() {
-        println!("{}", "test git update");
+        println!("test git update");
         let home_dir = dirs::home_dir().unwrap();
         git_update(&home_dir.join(".tpm").join("t"));
         assert_eq!(true, true);
@@ -624,7 +644,7 @@ mod tests {
     #[ignore]
     #[test]
     fn test_get_git_path() {
-        println!("{}", "print all git paht");
+        println!("print all git paht");
         let home_dir = dirs::home_dir().unwrap();
         get_git_path(&home_dir.join(".tpm"));
         assert_eq!(true, true);
@@ -679,6 +699,7 @@ mod tests {
         assert_generate_locks(mock_fs, expect_metas)
     }
 
+    #[ignore]
     #[test]
     fn test_git_clone_or_update_master() {
         git_clone_or_update_master(
@@ -732,5 +753,28 @@ mod tests {
         app.do_add_local_file(&local_path.join("a"));
         let metas = app.metas;
         assert_meta_eq(app_path, metas, vec![("a", vec!["123"], ".tpm/a")]);
+    }
+    #[test]
+    fn test_copy_dir() {
+        let local_dir_guard = FakeFileSystem::new().temp_dir("test_copy_dir").unwrap();
+        let local_path = local_dir_guard.path();
+        do_mock_fs(
+            local_path,
+            vec![
+                ("f", "a/.tpm", r#"{"kind":"mutli"}"#),
+                ("f", "a/b/.tpm", r#"{"kind":"single","tag":["1"]}"#),
+                ("f", "a/c/.tpm", r#"{"kind":"single","tag":["2"]}"#),
+            ],
+        );
+        println!("local path {:?}", local_path);
+        copy_dir(&local_path.join("a"), &local_path.join("a1")).unwrap();
+        do_assert_fs(
+            local_path,
+            vec![
+                ("f", "a1/.tpm", r#"{"kind":"mutli"}"#),
+                ("f", "a1/b/.tpm", r#"{"kind":"single","tag":["1"]}"#),
+                ("f", "a1/c/.tpm", r#"{"kind":"single","tag":["2"]}"#),
+            ],
+        );
     }
 }

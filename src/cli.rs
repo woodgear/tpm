@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use structopt::StructOpt;
 
 use std::str::FromStr;
-use url::{ParseError, Url};
+use url::Url;
 #[derive(Debug, Eq, PartialEq)]
 pub enum AddKind {
     Local(PathBuf),
@@ -27,8 +27,8 @@ impl FromStr for AddKind {
             return Ok(AddKind::Local(path.to_path_buf()));
         }
 
-        //maybe git url
-        let url = Url::parse(s)?;
+        //maybe git url we just check the format
+        let _url = Url::parse(s)?;
         return Ok(AddKind::Git(s.to_string()));
     }
 }
@@ -74,7 +74,7 @@ mod tests {
                 path: AddKind::Git("https://github.com/woodgear/t.git".to_string())
             }
         );
-        let opts: Opts = Opts::from_iter(vec!["./", "new", "123", "./"]);
+        let opts: Opts = Opts::from_iter(vec!["./", "new", "123"]);
         assert_eq!(
             opts.subcmd,
             SubCommand::New {
@@ -83,12 +83,12 @@ mod tests {
             }
         );
 
-        let opts: Opts = Opts::from_iter(vec!["./", "new", "123"]);
+        let opts: Opts = Opts::from_iter(vec!["./", "new", "123", "../"]);
         assert_eq!(
             opts.subcmd,
             SubCommand::New {
                 id: "123".to_string(),
-                expect_path: "./".to_string(),
+                expect_path: "../".to_string(),
             }
         );
 
