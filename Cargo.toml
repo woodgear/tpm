@@ -19,3 +19,8 @@ git2 = "0.11.0"
 context-attribute = {git="https://github.com/woodgear/context-attribute",branch="feature/custom-msg"}
 dirs = "2.0.2"
 git-url-parse = "0.0.1"
+maplit = "1.0.2"
+walkdir = "2.3.1"
+simple-replace-templete-engine = { git = "https://github.com/woodgear/simple-replace-templete-engine.git" }
+indexmap = "1.3.2"
+dialoguer = "0.5.0"

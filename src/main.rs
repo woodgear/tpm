@@ -65,6 +65,7 @@ enum TemplateKind {
     Local(String),
 }
 
+/// meta which in .tpm.lock
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 struct Meta {
     tag: Vec<String>,
@@ -229,8 +230,114 @@ fn copy_dir(origin_path: &Path, targent_path: &Path) -> Result<(), failure::Erro
     Ok(())
 }
 
+#[context(fn)]
+fn render_template(path: &Path) -> Result<(), failure::Error> {
+    use failure::ResultExt;
+    // .tpm struct
+    #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+    struct Meta {
+        template: Option<Template>,
+    }
+    #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+    struct Template {
+        prefix: String,
+    }
+    let config_path = path.join(".tpm");
+    if !config_path.exists() {
+        return Err(failure::format_err!(
+            "could not find cofnig {:?}",
+            config_path
+        ));
+    }
+
+    let meta: Meta = serde_json::from_str(&std::fs::read_to_string(&config_path)?)
+        .context("read meta json fail")?;
+    let prefix = {
+        if let Some(template) = meta.template {
+            template.prefix
+        } else {
+            return Ok(());
+        }
+    };
+    render_template_with_prefix(path, &prefix)?;
+
+    Ok(())
+}
+
+#[context(fn)]
+fn pick_names(path: &Path, prefix: &str) -> Result<Vec<String>, failure::Error> {
+    use failure::ResultExt;
+    use indexmap::IndexSet;
+    use simple_replace_templete_engine::get_variables;
+    use walkdir::WalkDir;
+    let mut names = IndexSet::new();
+    for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path().display().to_string();
+        for var in get_variables(&path, prefix).into_iter() {
+            names.insert(var);
+        }
+        let path = Path::new(&path);
+        if path.is_file() {
+            let content =
+                std::fs::read_to_string(&path).context(format!("read {:?} fail", path))?;
+
+            for var in get_variables(&content, prefix).into_iter() {
+                names.insert(var);
+            }
+        }
+    }
+    Ok(names.into_iter().collect())
+}
+
+#[context(fn)]
+fn ask_names(names: Vec<String>) -> Result<HashMap<String, String>, failure::Error> {
+    let mut values = HashMap::new();
+    use dialoguer::{theme::CustomPromptCharacterTheme, Input};
+
+    let theme = CustomPromptCharacterTheme::new('>');
+    for n in names {
+        let input: String = Input::with_theme(&theme).with_prompt(&n).interact()?;
+        values.insert(n, input);
+    }
+    return Ok(values);
+}
+
+#[context(fn)]
+fn render_template_with_prefix(path: &Path, prefix: &str) -> Result<(), failure::Error> {
+    let names = pick_names(path, prefix)?;
+    let values = ask_names(names)?;
+    _render_template(path, prefix, &values)?;
+    Ok(())
+}
+
+#[context(fn)]
+fn _render_template(
+    path: &Path,
+    prefix: &str,
+    values: &HashMap<String, String>,
+) -> Result<(), failure::Error> {
+    use simple_replace_templete_engine::render;
+    use std::fs;
+    use walkdir::WalkDir;
+    for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path().display().to_string();
+        let new_path = render(&path, prefix, &values)?;
+        if new_path != path {
+            fs::rename(&path, &new_path)?;
+        }
+        let new_path = Path::new(&new_path);
+        if new_path.is_file() {
+            let content = fs::read_to_string(&new_path)?;
+            let new_content = render(&content, prefix, &values)?;
+            if new_content != content {
+                fs::write(&new_path, new_content)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn get_git_path(root_path: &Path) -> Result<Vec<PathBuf>, failure::Error> {
-    println!("root path is {:?}", root_path);
     let mut git_paths = vec![];
     for e in root_path.read_dir()? {
         let e = e?;
@@ -241,6 +348,7 @@ fn get_git_path(root_path: &Path) -> Result<Vec<PathBuf>, failure::Error> {
     }
     Ok(git_paths)
 }
+
 fn git_update(git_path: &Path) -> Result<(), failure::Error> {
     use std::process::Command;
     println!("{:?}", git_path);
@@ -331,13 +439,15 @@ impl TemplateConfigLock {
     }
 
     #[context(fn)]
-    fn do_new(&self, id: String, exptect_path: String) -> Result<(), failure::Error> {
+    fn do_new(&self, id: String, expect_path: String) -> Result<(), failure::Error> {
         let template = self
             .metas
             .iter()
             .find(|t| t.name == id)
             .ok_or_else(|| failure::format_err!("could not find template {}", id))?;
-        copy_dir(Path::new(&template.path), Path::new(&exptect_path))?;
+        let expect_path = Path::new(&expect_path);
+        copy_dir(Path::new(&template.path), expect_path)?;
+        render_template(&expect_path)?;
         Ok(())
     }
 
@@ -356,7 +466,7 @@ impl TemplateConfigLock {
     }
 
     fn do_list_template(&self) {
-        println!("do list tepmlate");
+        println!("do list template");
         for m in self.metas.iter() {
             println!("{:?}", m);
         }
@@ -371,12 +481,6 @@ impl TemplateConfigLock {
         }
     }
 }
-
-// impl TemplateConfigLock {
-//     fn into_search(&self) -> Pin<Box<Searable<Meta>>> {
-//         return Searable::from(self.metas.clone());
-//     }
-// }
 
 impl TemplateConfigLock {
     #[context(fn)]
@@ -426,15 +530,6 @@ where
         return lis.into_iter().collect();
     }
 
-    // fn get(self: &Pin<Box<Self>>, tag: &str) -> Vec<T> {
-    //     let lis = self.hash.get(tag).unwrap_or(&vec![]).to_vec();
-    //     return unsafe { clone_from_nonnull(lis) };
-    // }
-
-    // fn get_all(self: &Pin<Box<Self>>) -> Vec<T> {
-    //     return self.data.clone();
-    // }
-
     fn search(self: &Pin<Box<Self>>, keywords: Vec<&str>) -> Vec<T>
     where
         T: Ord + Debug,
@@ -480,7 +575,7 @@ mod tests {
 
     #[test]
     fn test_get() {
-        #[derive(Debug, Clone, Eq, PartialEq)]
+        #[derive(Debug, Clone, PartialOrd, Ord, Eq, PartialEq)]
         struct Meta {
             tag: Vec<String>,
             name: String,
@@ -506,7 +601,7 @@ mod tests {
 
         let s = Searable::from(vec![m1.clone(), m2.clone(), m3.clone()]);
 
-        let l = s.get("t3");
+        let l = s.search(vec!["t3"]);
         assert_eq!(l, vec![m1.clone()]);
     }
 
@@ -774,6 +869,65 @@ mod tests {
                 ("f", "a1/.tpm", r#"{"kind":"mutli"}"#),
                 ("f", "a1/b/.tpm", r#"{"kind":"single","tag":["1"]}"#),
                 ("f", "a1/c/.tpm", r#"{"kind":"single","tag":["2"]}"#),
+            ],
+        );
+    }
+    #[ignore]
+    #[test]
+    fn test_ask_name() {
+        use maplit::hashmap;
+        println!("{:?}", "test ask name");
+        let vals = ask_names(vec!["name".to_owned(), "age".to_owned()]).unwrap();
+        assert_eq!(
+            vals,
+            hashmap! {
+                "name".to_owned() => "1  2".to_owned(),
+                "age".to_owned() => "12".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_render_template() {
+        let local_dir_guard = FakeFileSystem::new()
+            .temp_dir("test_render_template")
+            .unwrap();
+        let local_path = local_dir_guard.path();
+        do_mock_fs(
+            local_path,
+            vec![
+                ("f", "a/.tpm", r#"{"kind":"signle"}"#),
+                ("f", "a/b.txt", r#"my name is _t_name_t_ what is you name?"#),
+                (
+                    "f",
+                    "a/c.txt",
+                    r#"you name is _t_name_t_ my name is _t_second_name_t_,nice to see you"#,
+                ),
+            ],
+        );
+        let names = pick_names(&local_path, "_t_").unwrap();
+
+        assert_eq!(names, vec!["name".to_owned(), "second_name".to_owned()]);
+        use maplit::hashmap;
+        let values = hashmap! {
+            "name".to_string() => "a (with space) b".to_string(),
+            "second_name".to_string() => "normal".to_string(),
+        };
+        _render_template(local_path, "_t_", &values).unwrap();
+        do_assert_fs(
+            local_path,
+            vec![
+                ("f", "a/.tpm", r#"{"kind":"signle"}"#),
+                (
+                    "f",
+                    "a/b.txt",
+                    r#"my name is a (with space) b what is you name?"#,
+                ),
+                (
+                    "f",
+                    "a/c.txt",
+                    r#"you name is a (with space) b my name is normal,nice to see you"#,
+                ),
             ],
         );
     }
