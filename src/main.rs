@@ -163,6 +163,7 @@ fn generate_metas(root_path: &Path) -> Result<Vec<Meta>, failure::Error> {
     }
 
     #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
     enum TemplateKind {
         Mutli,
         Single,

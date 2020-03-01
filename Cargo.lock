@@ -95,6 +95,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-husky"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
 name = "cc"
 version = "1.0.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -790,6 +795,7 @@ dependencies = [
 name = "tpm"
 version = "0.1.0"
 dependencies = [
+ "cargo-husky 1.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "context-attribute 1.0.0 (git+https://github.com/woodgear/context-attribute?branch=feature/custom-msg)",
  "dialoguer 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "dirs 2.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -921,6 +927,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum bitflags 1.2.1 (registry+https://github.com/rust-lang/crates.io-index)" = "cf1de2fe8c75bc145a2f577add951f8134889b4795d47466a54a5c846d691693"
 "checksum blake2b_simd 0.5.10 (registry+https://github.com/rust-lang/crates.io-index)" = "d8fb2d74254a3a0b5cac33ac9f8ed0e44aa50378d9dbb2e5d83bd21ed1dc2c8a"
 "checksum c2-chacha 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)" = "214238caa1bf3a496ec3392968969cab8549f96ff30652c9e56885329315f6bb"
+"checksum cargo-husky 1.5.0 (registry+https://github.com/rust-lang/crates.io-index)" = "7b02b629252fe8ef6460461409564e2c21d0c8e77e0944f3d189ff06c4e932ad"
 "checksum cc 1.0.50 (registry+https://github.com/rust-lang/crates.io-index)" = "95e28fa049fda1c330bcf9d723be7663a899c4679724b34c81e9f5a326aab8cd"
 "checksum cfg-if 0.1.10 (registry+https://github.com/rust-lang/crates.io-index)" = "4785bdd1c96b2a846b2bd7cc02e86b6b3dbf14e7e53446c4f54c92a361040822"
 "checksum clap 2.33.0 (registry+https://github.com/rust-lang/crates.io-index)" = "5067f5bb2d80ef5d68b4c87db81601f0b75bca627bc2ef76b141d7b846a3c6d9"

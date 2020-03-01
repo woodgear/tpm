@@ -24,3 +24,8 @@ walkdir = "2.3.1"
 simple-replace-templete-engine = { git = "https://github.com/woodgear/simple-replace-templete-engine.git" }
 indexmap = "1.3.2"
 dialoguer = "0.5.0"
+
+[dev-dependencies.cargo-husky]
+version = "1"
+default-features = false # Disable features which are enabled by default
+features = ["prepush-hook", "run-cargo-test", "run-cargo-clippy"]
