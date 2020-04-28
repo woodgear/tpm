@@ -231,9 +231,12 @@ fn copy_dir(origin_path: &Path, targent_path: &Path) -> Result<(), failure::Erro
     Ok(())
 }
 
-#[context(fn)]
-fn render_template(path: &Path) -> Result<(), failure::Error> {
+mod render_template {
+    use super::render_template_with_prefix;
+    use crate::context;
     use failure::ResultExt;
+    use serde::{Deserialize, Serialize};
+    use std::path::Path;
     // .tpm struct
     #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
     struct Meta {
@@ -243,28 +246,59 @@ fn render_template(path: &Path) -> Result<(), failure::Error> {
     struct Template {
         prefix: String,
     }
-    let config_path = path.join(".tpm");
-    if !config_path.exists() {
-        return Err(failure::format_err!(
-            "could not find cofnig {:?}",
-            config_path
-        ));
+    #[context(fn)]
+    pub fn render_template(path: &Path) -> Result<(), failure::Error> {
+        use failure::ResultExt;
+
+        let config_path = path.join(".tpm");
+        if !config_path.exists() {
+            return Err(failure::format_err!(
+                "could not find cofnig {:?}",
+                config_path
+            ));
+        }
+
+        let meta_raw_json = &std::fs::read_to_string(&config_path)?;
+        let meta: Meta = serde_json::from_str(meta_raw_json).context("read meta json fail")?;
+        let prefix = {
+            if let Some(template) = meta.template {
+                template.prefix
+            } else {
+                return Ok(());
+            }
+        };
+        render_template_with_prefix(path, &prefix)?;
+
+        Ok(())
     }
 
-    let meta: Meta = serde_json::from_str(&std::fs::read_to_string(&config_path)?)
-        .context("read meta json fail")?;
-    let prefix = {
-        if let Some(template) = meta.template {
-            template.prefix
-        } else {
-            return Ok(());
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn test_parser_meta() {
+            let raw = r#"
+           {
+            "tag":["rust","cli","log"],
+            "kind":"single",
+            "tepmlate":{
+                "prefix":"_t_"
+            }
         }
-    };
-    render_template_with_prefix(path, &prefix)?;
-
-    Ok(())
+           "#;
+            let meta: Meta = serde_json::from_str(raw).unwrap();
+            assert_eq!(
+                meta,
+                Meta {
+                    template: Some(Template {
+                        prefix: "_t_".to_string()
+                    })
+                }
+            )
+        }
+    }
 }
-
+use render_template::render_template;
 #[context(fn)]
 fn pick_names(path: &Path, prefix: &str) -> Result<Vec<String>, failure::Error> {
     use failure::ResultExt;
@@ -305,8 +339,20 @@ fn ask_names(names: Vec<String>) -> Result<HashMap<String, String>, failure::Err
 
 #[context(fn)]
 fn render_template_with_prefix(path: &Path, prefix: &str) -> Result<(), failure::Error> {
-    let names = pick_names(path, prefix)?;
-    let values = ask_names(names)?;
+    let mut names = pick_names(path, prefix)?;
+
+    let name = path
+        .file_name()
+        .ok_or(failure::err_msg("could nt find file name"))?;
+    let name = name.to_string_lossy().to_string();
+    let _removed = names
+        .iter()
+        .position(|n| n == "name")
+        .map(|e| names.remove(e))
+        .is_some();
+
+    let mut values = ask_names(names)?;
+    values.insert("name".to_string(), name);
     _render_template(path, prefix, &values)?;
     Ok(())
 }
