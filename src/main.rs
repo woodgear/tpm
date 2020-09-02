@@ -281,7 +281,7 @@ mod render_template {
            {
             "tag":["rust","cli","log"],
             "kind":"single",
-            "tepmlate":{
+            "template":{
                 "prefix":"_t_"
             }
         }
